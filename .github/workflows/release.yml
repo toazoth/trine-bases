@@ -1,0 +1,78 @@
+name: release
+
+on:
+  push:
+    tags:
+      - '*-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing git tag to (re-)release, e.g. quickjs-v0.15.0'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Parse tag
+        id: parse
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          runtime="${tag%%-*}"
+          version="${tag#*-}"
+          if [ -z "$runtime" ] || [ -z "$version" ] || [ "$runtime" = "$tag" ]; then
+            echo "tag '${tag}' must be <runtime>-<version>" >&2
+            exit 1
+          fi
+          {
+            echo "tag=${tag}"
+            echo "runtime=${runtime}"
+            echo "version=${version}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify recipe exists
+        run: |
+          recipe="recipes/${{ steps.parse.outputs.runtime }}.sh"
+          if [ ! -x "$recipe" ]; then
+            echo "no executable recipe at $recipe" >&2
+            exit 1
+          fi
+
+      - name: Stage assets
+        run: |
+          mkdir -p staging
+          "recipes/${{ steps.parse.outputs.runtime }}.sh" \
+            "${{ steps.parse.outputs.version }}" \
+            staging
+
+      - name: Generate SHA256SUM
+        working-directory: staging
+        run: |
+          : > SHA256SUM
+          for f in *; do
+            case "$f" in NOTES.md|SHA256SUM) continue ;; esac
+            sha256sum "$f" >> SHA256SUM
+          done
+          cat SHA256SUM
+
+      - name: Create release
+        working-directory: staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=()
+          for f in *; do
+            [ "$f" = NOTES.md ] && continue
+            assets+=("$f")
+          done
+          gh release create "${{ steps.parse.outputs.tag }}" \
+            "${assets[@]}" \
+            --title "${{ steps.parse.outputs.runtime }} ${{ steps.parse.outputs.version }}" \
+            --notes-file NOTES.md
